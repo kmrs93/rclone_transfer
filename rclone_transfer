@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# --- File picker ---
+echo "Select source files/directories (TAB to mark multiple, ENTER to confirm):"
+SRC=$(find . -mindepth 1 | fzf -m)
+
+# Ask for destination
+read -e -p "Enter destination path (local or remote): " DEST
+
+# --- Calculate total size of sources ---
+echo "Calculating total size of selected sources..."
+TOTAL_SIZE_BYTES=$(du -sb $SRC 2>/dev/null | awk '{sum+=$1} END {print sum}')
+TOTAL_SIZE_HUMAN=$(du -ch $SRC 2>/dev/null | tail -n 1 | awk '{print $1}')
+
+# --- Check free space at destination ---
+FREE_SPACE_BYTES=0
+FREE_SPACE_HUMAN=""
+
+echo "Checking free space at destination..."
+if [[ "$DEST" == *:* ]]; then
+  # Remote destination (e.g., gdrive:)
+  REMOTE=$(echo "$DEST" | cut -d: -f1)
+  ABOUT=$(rclone about "$REMOTE": 2>/dev/null)
+  FREE_SPACE_BYTES=$(echo "$ABOUT" | grep "Free:" | awk '{print $2}')
+  FREE_SPACE_HUMAN=$(echo "$ABOUT" | grep "Free:" | awk '{print $2" "$3}')
+  echo "$ABOUT"
+else
+  # Local destination
+  FREE_SPACE_BYTES=$(df -Pk "$DEST" 2>/dev/null | awk 'NR==2 {print $4*1024}')
+  FREE_SPACE_HUMAN=$(df -h "$DEST" 2>/dev/null | awk 'NR==2 {print $4}')
+  echo "Free space: $FREE_SPACE_HUMAN"
+fi
+
+echo "--------------------------------------------------"
+echo "Total size of sources: $TOTAL_SIZE_HUMAN"
+echo "--------------------------------------------------"
+
+# Warn if free space is insufficient
+if [ "$FREE_SPACE_BYTES" -ne 0 ] && [ "$TOTAL_SIZE_BYTES" -gt "$FREE_SPACE_BYTES" ]; then
+  echo "WARNING: Total size of sources ($TOTAL_SIZE_HUMAN) exceeds free space at destination ($FREE_SPACE_HUMAN)."
+  echo "Transfer cannot proceed safely."
+  exit 1
+fi
+
+# Ask whether to copy or move
+echo "Choose operation:"
+echo "1) Copy"
+echo "2) Move"
+read -p "Enter choice [1-2]: " OPERATION
+
+# Ask how to run the process
+echo "Choose how to run the transfer:"
+echo "1) Foreground (normal)"
+echo "2) Background - attached (logs visible)"
+echo "3) Background - detached (no logs, disowned)"
+read -p "Enter choice [1-3]: " RUNMODE
+
+# Ask about logging
+echo "Do you want to enable logging?"
+echo "1) No logging"
+echo "2) Log to file"
+read -p "Enter choice [1-2]: " LOGGING
+
+LOGFILE="rclone.log"
+if [ "$LOGGING" -eq 2 ]; then
+  read -e -i "$LOGFILE" -p "Enter log filename (default: rclone.log): " LOGFILE
+fi
+
+# Decide command based on operation
+case $OPERATION in
+  1) BASECMD="rclone copy $SRC \"$DEST\" --progress" ;;
+  2) BASECMD="rclone move $SRC \"$DEST\" --progress" ;;
+  *) echo "Invalid operation choice. Exiting."; exit 1 ;;
+esac
+
+# Add logging if chosen
+if [ "$LOGGING" -eq 2 ]; then
+  CMD="$BASECMD >> \"$LOGFILE\" 2>&1"
+else
+  CMD="$BASECMD"
+fi
+
+# Show summary
+echo "--------------------------------------------------"
+echo "You selected the following sources:"
+echo "$SRC" | sed 's/^/  - /'
+echo "Destination: $DEST"
+echo "Operation: $( [ "$OPERATION" -eq 1 ] && echo Copy || echo Move )"
+echo "Run mode: $( [ "$RUNMODE" -eq 1 ] && echo Foreground || [ "$RUNMODE" -eq 2 ] && echo Background-attached || echo Background-detached )"
+if [ "$LOGGING" -eq 2 ]; then
+  echo "Logging enabled: $LOGFILE"
+else
+  echo "Logging: Disabled"
+fi
+echo "--------------------------------------------------"
+echo "Final command:"
+echo "$CMD"
+echo "--------------------------------------------------"
+
+# Confirmation (default Y)
+read -p "Proceed? [Y/n]: " CONFIRM
+CONFIRM=${CONFIRM:-Y}
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+  echo "Operation cancelled."
+  exit 0
+fi
+
+# Extra safety check for move
+if [ "$OPERATION" -eq 2 ]; then
+  echo "WARNING: You chose MOVE. This will DELETE the source files/directories after transfer."
+  read -p "Are you absolutely sure? [y/N]: " MOVE_CONFIRM
+  if [[ ! "$MOVE_CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "Move operation cancelled."
+    exit 0
+  fi
+fi
+
+# Execute based on run mode
+case $RUNMODE in
+  1) eval $CMD ;;
+  2) eval $CMD & echo "Running in background (attached). PID: $!" ;;
+  3) nohup bash -c "$CMD" >/dev/null 2>&1 & disown; echo "Running in background (detached). PID: $!" ;;
+  *) echo "Invalid run mode choice. Exiting." ;;
+esac
+
+# Append summary to log file if logging enabled
+if [ "$LOGGING" -eq 2 ]; then
+  {
+    echo "--------------------------------------------------"
+    echo "TRANSFER SUMMARY"
+    echo "Sources:"
+    echo "$SRC" | sed 's/^/  - /'
+    echo "Destination: $DEST"
+    echo "Operation: $( [ "$OPERATION" -eq 1 ] && echo Copy || echo Move )"
+    echo "Run mode: $( [ "$RUNMODE" -eq 1 ] && echo Foreground || [ "$RUNMODE" -eq 2 ] && echo Background-attached || echo Background-detached )"
+    echo "Log file: $LOGFILE"
+    echo "Timestamp: $(date)"
+    echo "Total size of sources: $TOTAL_SIZE_HUMAN"
+    if [ -n "$FREE_SPACE_HUMAN" ]; then
+      echo "Free space at destination: $FREE_SPACE_HUMAN"
+    fi
+    echo "--------------------------------------------------"
+  } >> "$LOGFILE"
+fi
