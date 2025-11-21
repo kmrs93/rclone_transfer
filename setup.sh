@@ -29,7 +29,7 @@ check_and_install() {
 
 # Check required dependencies
 check_and_install rclone
-check_and_install fzf
+#check_and_install fzf
 
 # --- Install rclone_transfer script ---
 chmod +x rclone_transfer
