@@ -27,23 +27,18 @@ check_and_install() {
   fi
 }
 
-# Check required dependencies
+# --- Check required dependencies ---
 check_and_install rclone
-#check_and_install fzf
 
-# --- Install rclone_transfer script ---
+# --- Make scripts executable ---
 chmod +x rclone_transfer
+chmod +x uninstall.sh
 
+# --- Install rclone_transfer globally ---
 INSTALL_DIR="/usr/local/bin"
 read -p "Install to [$INSTALL_DIR]? " REPLY
 INSTALL_DIR=${REPLY:-$INSTALL_DIR}
 
 sudo cp rclone_transfer "$INSTALL_DIR/"
 
-# Verify installation
-if command -v rclone_transfer >/dev/null 2>&1; then
-  echo "✅ rclone_transfer installed successfully!"
-  echo "You can now run it from anywhere by typing: rclone_transfer"
-else
-  echo "❌ Installation failed. Please check permissions."
-fi
+#
