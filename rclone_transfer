@@ -7,48 +7,51 @@ RUNMODE=""
 LOGGING=1
 LOGFILE="rclone.log"
 
-# --- Parse arguments ---
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    -e|--files)
-      shift
-      while [[ $# -gt 0 && $1 != -* ]]; do
-        for f in $1; do
-          FILES+=("$f")
-        done
-        shift
-      done
-      ;;
-    -d|--dest)
-      DEST="$2"
-      shift 2
-      ;;
-    -o|--operation)
-      OPERATION="$2"   # copy or move
-      shift 2
-      ;;
-    -r|--runmode)
-      RUNMODE="$2"     # 1=foreground, 2=background-attached, 3=background-detached
-      shift 2
-      ;;
-    -l|--log)
-      LOGGING=2
-      LOGFILE="$2"
-      shift 2
-      ;;
-    *)
-      echo "Unknown option: $1"
-      exit 1
-      ;;
-  esac
+# --- Ask for source files repeatedly ---
+echo "Enter source files or directories one by one (wildcards allowed, e.g. *.txt)."
+echo "Press ENTER on an empty line when done."
+while true; do
+  read -e -p "Source file: " FILE
+  if [ -z "$FILE" ]; then
+    break
+  fi
+  FILES+=("$FILE")
 done
 
-if [ ${#FILES[@]} -eq 0 ] || [ -z "$DEST" ]; then
-  echo "Usage: rclone_transfer -e <file1> <file2> ... -d <destination> -o <copy|move> -r <1|2|3> [-l logfile]"
+if [ ${#FILES[@]} -eq 0 ]; then
+  echo "No source files selected. Exiting."
   exit 1
 fi
 
+# --- Review step ---
+echo "--------------------------------------------------"
+echo "You selected the following sources:"
+for i in "${!FILES[@]}"; do
+  echo "$((i+1))) ${FILES[$i]}"
+done
+echo "--------------------------------------------------"
+read -p "Do you want to remove any file? Enter numbers separated by spaces, or press ENTER to keep all: " REMOVE
+
+if [ -n "$REMOVE" ]; then
+  NEWFILES=()
+  for i in "${!FILES[@]}"; do
+    if [[ ! " $REMOVE " =~ " $((i+1)) " ]]; then
+      NEWFILES+=("${FILES[$i]}")
+    fi
+  done
+  FILES=("${NEWFILES[@]}")
+fi
+
+if [ ${#FILES[@]} -eq 0 ]; then
+  echo "No files left after removal. Exiting."
+  exit 1
+fi
+
+# --- Ask for destination ---
+read -e -p "Enter destination path (local or remote, e.g. /mnt/backup or gdrive:backup): " DEST
+
 # --- Calculate total size of sources ---
+echo "Calculating total size of selected sources..."
 TOTAL_SIZE_BYTES=$(du -sb "${FILES[@]}" 2>/dev/null | awk '{sum+=$1} END {print sum}')
 TOTAL_SIZE_HUMAN=$(du -ch "${FILES[@]}" 2>/dev/null | tail -n 1 | awk '{print $1}')
 
@@ -56,6 +59,7 @@ TOTAL_SIZE_HUMAN=$(du -ch "${FILES[@]}" 2>/dev/null | tail -n 1 | awk '{print $1
 FREE_SPACE_BYTES=0
 FREE_SPACE_HUMAN=""
 
+echo "Checking free space at destination..."
 if [[ "$DEST" == *:* ]]; then
   REMOTE=$(echo "$DEST" | cut -d: -f1)
   ABOUT=$(rclone about "$REMOTE": 2>/dev/null)
@@ -77,11 +81,35 @@ if [ "$FREE_SPACE_BYTES" -ne 0 ] && [ "$TOTAL_SIZE_BYTES" -gt "$FREE_SPACE_BYTES
   exit 1
 fi
 
+# --- Ask for operation ---
+echo "Choose operation:"
+echo "1) Copy"
+echo "2) Move"
+read -p "Enter choice [1-2]: " OPERATION
+
+# --- Ask for run mode ---
+echo "Choose how to run the transfer:"
+echo "1) Foreground (normal)"
+echo "2) Background - attached (logs visible)"
+echo "3) Background - detached (no logs, disowned)"
+read -p "Enter choice [1-3]: " RUNMODE
+
+# --- Ask about logging ---
+echo "Do you want to enable logging?"
+echo "1) No logging"
+echo "2) Log to file"
+read -p "Enter choice [1-2]: " LOGGING
+
+LOGFILE="rclone.log"
+if [ "$LOGGING" -eq 2 ]; then
+  read -e -i "$LOGFILE" -p "Enter log filename (default: rclone.log): " LOGFILE
+fi
+
 # --- Build rclone command ---
 case $OPERATION in
-  copy) BASECMD="rclone copy ${FILES[*]} \"$DEST\" --progress" ;;
-  move) BASECMD="rclone move ${FILES[*]} \"$DEST\" --progress" ;;
-  *) echo "Invalid operation. Use -o copy or -o move."; exit 1 ;;
+  1) BASECMD="rclone copy ${FILES[*]} \"$DEST\" --progress" ;;
+  2) BASECMD="rclone move ${FILES[*]} \"$DEST\" --progress" ;;
+  *) echo "Invalid operation choice. Exiting."; exit 1 ;;
 esac
 
 if [ "$LOGGING" -eq 2 ]; then
@@ -91,13 +119,14 @@ else
 fi
 
 # --- Summary ---
+echo "--------------------------------------------------"
 echo "Sources:"
 for f in "${FILES[@]}"; do echo "  - $f"; done
 echo "Destination: $DEST"
-echo "Operation: $OPERATION"
+echo "Operation: $( [ "$OPERATION" -eq 1 ] && echo Copy || echo Move )"
 echo "Run mode: $RUNMODE"
 if [ "$LOGGING" -eq 2 ]; then
-  echo "Logging: $LOGFILE"
+  echo "Logging enabled: $LOGFILE"
 else
   echo "Logging: Disabled"
 fi
@@ -105,6 +134,7 @@ echo "--------------------------------------------------"
 echo "Final command: $CMD"
 echo "--------------------------------------------------"
 
+# --- Confirmation ---
 read -p "Proceed? [Y/n]: " CONFIRM
 CONFIRM=${CONFIRM:-Y}
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
@@ -112,7 +142,8 @@ if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
   exit 0
 fi
 
-if [ "$OPERATION" == "move" ]; then
+# Extra safety for move
+if [ "$OPERATION" -eq 2 ]; then
   echo "WARNING: MOVE will DELETE source files after transfer."
   read -p "Are you absolutely sure? [y/N]: " MOVE_CONFIRM
   if [[ ! "$MOVE_CONFIRM" =~ ^[Yy]$ ]]; then
@@ -121,20 +152,22 @@ if [ "$OPERATION" == "move" ]; then
   fi
 fi
 
+# --- Execute ---
 case $RUNMODE in
   1) eval $CMD ;;
   2) eval $CMD & echo "Running in background (attached). PID: $!" ;;
   3) nohup bash -c "$CMD" >/dev/null 2>&1 & disown; echo "Running in background (detached). PID: $!" ;;
-  *) echo "Invalid run mode. Use -r 1|2|3."; exit 1 ;;
+  *) echo "Invalid run mode choice. Exiting." ;;
 esac
 
+# --- Append summary to log ---
 if [ "$LOGGING" -eq 2 ]; then
   {
     echo "--------------------------------------------------"
     echo "TRANSFER SUMMARY"
     for f in "${FILES[@]}"; do echo "  - $f"; done
     echo "Destination: $DEST"
-    echo "Operation: $OPERATION"
+    echo "Operation: $( [ "$OPERATION" -eq 1 ] && echo Copy || echo Move )"
     echo "Run mode: $RUNMODE"
     echo "Log file: $LOGFILE"
     echo "Timestamp: $(date)"
